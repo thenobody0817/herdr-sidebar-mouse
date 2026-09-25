@@ -1,69 +1,119 @@
+diff --git a/src/client/mod.rs b/src/client/mod.rs
+index cb46509..51f0961 100644
+--- a/src/client/mod.rs
++++ b/src/client/mod.rs
+@@ -421,6 +421,7 @@ async fn run_client_loop(
+     };
+     let mut federated = endpoint_catalog.has_enabled_ssh();
+     if let Some(shell) = state.shell.as_mut() {
++        shell.refresh_omarchy_theme();
+         shell.set_graphics_cell_size(initial_cell_width_px, initial_cell_height_px);
+         shell.set_endpoint_catalog(&endpoint_catalog.ssh);
+         shell.set_endpoint_methods_for(
 diff --git a/src/client/shell/agent_sidebar.rs b/src/client/shell/agent_sidebar.rs
-index e43ab8c..361be4f 100644
+index e43ab8c..9b38cb2 100644
 --- a/src/client/shell/agent_sidebar.rs
 +++ b/src/client/shell/agent_sidebar.rs
-@@ -56,6 +56,7 @@ pub(super) fn render_agent_panel(
+@@ -56,6 +56,8 @@ pub(super) fn render_agent_panel(
      config: &ClientShellConfig,
      agent_scroll: &mut usize,
      hits: &mut ShellHitMap,
 +    hover: Option<&ClientSidebarHoverTarget>,
++    hover_bg: ratatui::style::Color,
  ) {
      if !render_agent_panel_header(
          buffer,
-@@ -82,7 +83,9 @@ pub(super) fn render_agent_panel(
+@@ -82,7 +84,9 @@ pub(super) fn render_agent_panel(
          |row| row.rows.len(),
          |buffer, rect, row, hits| {
              hits.agents.push((rect, row.pane_id.clone()));
 -            render_agent_row(buffer, rect, row, config);
 +            let hovered = hover
 +                .is_some_and(|target| target.matches_agent(&ClientEndpointId::Local, &row.pane_id));
-+            render_agent_row(buffer, rect, row, config, hovered);
++            render_agent_row(buffer, rect, row, config, hovered, hover_bg);
          },
      );
  }
-@@ -323,10 +326,13 @@ pub(super) fn render_agent_row(
+@@ -323,10 +327,14 @@ pub(super) fn render_agent_row(
      rect: Rect,
      row: &AgentRow,
      config: &ClientShellConfig,
 +    hovered: bool,
++    hover_bg: ratatui::style::Color,
  ) {
      let palette = &config.palette;
      let row_style = if row.focused {
          Style::default().bg(palette.active_row_bg)
 +    } else if hovered {
-+        Style::default().bg(palette.surface1)
++        Style::default().bg(hover_bg)
      } else {
          Style::default()
      };
 diff --git a/src/client/shell/composition.rs b/src/client/shell/composition.rs
-index e0888d0..9738ea1 100644
+index e0888d0..0eef091 100644
 --- a/src/client/shell/composition.rs
 +++ b/src/client/shell/composition.rs
-@@ -69,6 +69,7 @@ impl ClientShellState {
+@@ -48,6 +48,7 @@ impl ClientShellState {
+                 && self.endpoint_status(&self.active_endpoint_id)
+                     == Some(ClientEndpointStatus::Online)
+         });
++        let hover_bg = self.resolved_hover_bg();
+         let mut render_state = render::ShellRenderState {
+             endpoints: &self.endpoints,
+             active_endpoint_id: &self.active_endpoint_id,
+@@ -69,6 +70,8 @@ impl ClientShellState {
              reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
              dragged_workspace_id: None,
              workspace_drop_indicator_row: None,
 +            sidebar_hover: self.sidebar_hover.as_ref(),
++            hover_bg,
          };
          if let Some(snapshot) = local_snapshot {
              render::render_sidebar(
-@@ -204,6 +205,7 @@ impl ClientShellState {
+@@ -178,6 +181,7 @@ impl ClientShellState {
+             _ => (None, None),
+         };
+         let mut buffer = Buffer::empty(Rect::new(0, 0, cols, rows));
++        let hover_bg = self.resolved_hover_bg();
+         self.hits = render::render_shell(
+             &mut buffer,
+             layout,
+@@ -204,6 +208,8 @@ impl ClientShellState {
                  reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
                  dragged_workspace_id,
                  workspace_drop_indicator_row,
 +                sidebar_hover: self.sidebar_hover.as_ref(),
++                hover_bg,
              },
          );
          self.hits.panes = surface
+diff --git a/src/client/shell/config.rs b/src/client/shell/config.rs
+index 2d16b00..0971904 100644
+--- a/src/client/shell/config.rs
++++ b/src/client/shell/config.rs
+@@ -135,6 +135,12 @@ impl ClientShellConfig {
+             theme_name: theme_runtime.manual_name.clone(),
+             theme_runtime,
+             palette: crate::app::client_palette_from_config(config),
++            hover_bg_override: config
++                .theme
++                .custom
++                .as_ref()
++                .and_then(|custom| custom.hover_bg.as_deref())
++                .map(crate::config::parse_color),
+             keybinds: config
+                 .live_keybinds_with_diagnostics()
+                 .map(|(keybinds, _diagnostics)| keybinds)
 diff --git a/src/client/shell/endpoint_agents.rs b/src/client/shell/endpoint_agents.rs
-index 3cc106b..5792aea 100644
+index 3cc106b..997b8ac 100644
 --- a/src/client/shell/endpoint_agents.rs
 +++ b/src/client/shell/endpoint_agents.rs
-@@ -8,12 +8,17 @@ pub(super) fn render_collapsed(
+@@ -8,12 +8,18 @@ pub(super) fn render_collapsed(
      active_endpoint_id: &ClientEndpointId,
      config: &ClientShellConfig,
      hits: &mut ShellHitMap,
 +    hover: Option<&ClientSidebarHoverTarget>,
++    hover_bg: ratatui::style::Color,
  ) {
      let rows = agent_rows(endpoints, active_endpoint_id, config);
      for (index, row) in rows.into_iter().take(area.height as usize).enumerate() {
@@ -73,31 +123,34 @@ index 3cc106b..5792aea 100644
          if row.agent.focused {
              buffer.set_style(rect, Style::default().bg(config.palette.active_row_bg));
 +        } else if hovered {
-+            buffer.set_style(rect, Style::default().bg(config.palette.surface1));
++            buffer.set_style(rect, Style::default().bg(hover_bg));
          }
          let initial = row.machine_label.chars().next().unwrap_or('?');
          put_text(
-@@ -51,6 +56,7 @@ pub(super) fn render_expanded(
+@@ -51,6 +57,8 @@ pub(super) fn render_expanded(
      config: &ClientShellConfig,
      agent_scroll: &mut usize,
      hits: &mut ShellHitMap,
 +    hover: Option<&ClientSidebarHoverTarget>,
++    hover_bg: ratatui::style::Color,
  ) {
      if !super::agent_sidebar::render_agent_panel_header(
          buffer,
-@@ -72,7 +78,9 @@ pub(super) fn render_expanded(
+@@ -72,7 +80,11 @@ pub(super) fn render_expanded(
          hits,
          |row| row.agent.rows.len(),
          |buffer, rect, row, hits| {
 -            super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config);
 +            let hovered = hover
 +                .is_some_and(|target| target.matches_agent(&row.endpoint_id, &row.agent.pane_id));
-+            super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config, hovered);
++            super::agent_sidebar::render_agent_row(
++                buffer, rect, &row.agent, config, hovered, hover_bg,
++            );
              if row.stale {
                  buffer.set_style(
                      rect,
 diff --git a/src/client/shell/endpoint_sidebar.rs b/src/client/shell/endpoint_sidebar.rs
-index 34d2ccd..dc35b2a 100644
+index 34d2ccd..d28d69e 100644
 --- a/src/client/shell/endpoint_sidebar.rs
 +++ b/src/client/shell/endpoint_sidebar.rs
 @@ -120,6 +120,9 @@ pub(super) fn render_collapsed(
@@ -115,19 +168,20 @@ index 34d2ccd..dc35b2a 100644
              } else if focused {
                  buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
 +            } else if hovered {
-+                buffer.set_style(rect, Style::default().bg(palette.surface1));
++                buffer.set_style(rect, Style::default().bg(state.hover_bg));
              }
              let stale = endpoint.status != ClientEndpointStatus::Online;
              let number = format!(" {}", workspace.number);
-@@ -193,6 +198,7 @@ pub(super) fn render_collapsed(
+@@ -193,6 +198,8 @@ pub(super) fn render_collapsed(
          state.active_endpoint_id,
          config,
          hits,
 +        state.sidebar_hover,
++        state.hover_bg,
      );
      hits.sidebar_toggle = if area.is_empty() || workspace_area.width == 0 {
          Rect::default()
-@@ -462,6 +468,12 @@ pub(super) fn render_expanded(
+@@ -462,6 +469,12 @@ pub(super) fn render_expanded(
                  if selected && palette.selection_bg == ratatui::style::Color::Reset {
                      buffer.set_style(nested, Style::default().bg(palette.active_row_bg));
                  }
@@ -135,24 +189,56 @@ index 34d2ccd..dc35b2a 100644
 +                    target.matches_workspace(&endpoint.endpoint_id, &workspace.workspace_id)
 +                });
 +                if hovered && !selected && !(endpoint_active && workspace.focused) {
-+                    buffer.set_style(rect, Style::default().bg(palette.surface1));
++                    buffer.set_style(rect, Style::default().bg(state.hover_bg));
 +                }
                  if endpoint.status != ClientEndpointStatus::Online {
                      buffer.set_style(
                          rect,
-@@ -543,6 +555,7 @@ pub(super) fn render_expanded(
+@@ -543,6 +556,8 @@ pub(super) fn render_expanded(
          config,
          state.agent_scroll,
          hits,
 +        state.sidebar_hover,
++        state.hover_bg,
      );
      hits.sidebar_toggle = Rect::new(
          area.right().saturating_sub(2),
+diff --git a/src/client/shell/input.rs b/src/client/shell/input.rs
+index c6d458c..65fa5ae 100644
+--- a/src/client/shell/input.rs
++++ b/src/client/shell/input.rs
+@@ -259,6 +259,7 @@ impl ClientShellState {
+                     self.host_appearance = Some(appearance);
+                     self.host_appearance_explicit = true;
+                     outcome.query_host_theme = true;
++                    outcome.repaint |= self.refresh_omarchy_theme();
+                     if self.config.theme_runtime.auto_switch {
+                         self.config.palette = crate::app::client_palette_for_appearance(
+                             &self.config.theme_runtime,
+@@ -287,8 +288,16 @@ impl ClientShellState {
+                         }
+                     }
+                 }
+-                RawInputEvent::HostDefaultColor { .. }
+-                | RawInputEvent::HostPaletteColors { .. }
++                RawInputEvent::HostDefaultColor {
++                    kind: crate::terminal_theme::DefaultColorKind::Foreground,
++                    color,
++                } => {
++                    if self.host_foreground != Some(color) {
++                        self.host_foreground = Some(color);
++                        outcome.repaint = true;
++                    }
++                }
++                RawInputEvent::HostPaletteColors { .. }
+                 | RawInputEvent::HostCellSizeReport { .. }
+                 | RawInputEvent::Unsupported => {}
+             }
 diff --git a/src/client/shell/mouse.rs b/src/client/shell/mouse.rs
-index 0b9326d..cf38300 100644
+index 0b9326d..a0f3e13 100644
 --- a/src/client/shell/mouse.rs
 +++ b/src/client/shell/mouse.rs
-@@ -35,6 +35,187 @@ impl ClientShellState {
+@@ -35,6 +35,165 @@ impl ClientShellState {
          }
      }
  
@@ -226,19 +312,10 @@ index 0b9326d..cf38300 100644
 +            return;
 +        }
 +        let anchor = self
-+            .sidebar_hover
-+            .as_ref()
-+            .and_then(|hover| match hover {
-+                ClientSidebarHoverTarget::Workspace {
-+                    endpoint_id,
-+                    workspace_id,
-+                } => self.hits.workspaces.iter().position(|hit| {
-+                    &hit.endpoint_id == endpoint_id && &hit.workspace_id == workspace_id
-+                }),
-+                ClientSidebarHoverTarget::Agent { .. } => None,
-+            })
-+            .or_else(|| {
-+                let focused = self.snapshot.as_deref()?.focused_workspace_id.as_deref()?;
++            .snapshot
++            .as_deref()
++            .and_then(|snapshot| {
++                let focused = snapshot.focused_workspace_id.as_deref()?;
 +                self.hits.workspaces.iter().position(|hit| {
 +                    hit.endpoint_id == self.active_endpoint_id && hit.workspace_id == focused
 +                })
@@ -257,7 +334,6 @@ index 0b9326d..cf38300 100644
 +        if already_focused {
 +            return;
 +        }
-+        self.sidebar_hover = None;
 +        self.reveal_workspace(&workspace_id);
 +        if self.focus_or_activate(
 +            endpoint_id,
@@ -290,21 +366,10 @@ index 0b9326d..cf38300 100644
 +            return;
 +        }
 +        let anchor = self
-+            .sidebar_hover
-+            .as_ref()
-+            .and_then(|hover| match hover {
-+                ClientSidebarHoverTarget::Agent {
-+                    endpoint_id,
-+                    pane_id,
-+                } => order
-+                    .iter()
-+                    .position(|(candidate_endpoint, candidate_pane)| {
-+                        candidate_endpoint == endpoint_id && candidate_pane == pane_id
-+                    }),
-+                ClientSidebarHoverTarget::Workspace { .. } => None,
-+            })
-+            .or_else(|| {
-+                let focused = self.snapshot.as_deref()?.focused_pane_id.as_deref()?;
++            .snapshot
++            .as_deref()
++            .and_then(|snapshot| {
++                let focused = snapshot.focused_pane_id.as_deref()?;
 +                order.iter().position(|(endpoint_id, pane_id)| {
 +                    endpoint_id == &self.active_endpoint_id && pane_id == focused
 +                })
@@ -327,7 +392,6 @@ index 0b9326d..cf38300 100644
 +        {
 +            self.agent_scroll = next.min(self.hits.agent_max_scroll);
 +        }
-+        self.sidebar_hover = None;
 +        if self.focus_or_activate(
 +            endpoint_id,
 +            ClientEndpointFocusTarget::Pane(pane_id),
@@ -340,7 +404,7 @@ index 0b9326d..cf38300 100644
      fn pane_scrollbar_offset(
          hit: &PaneHit,
          row: u16,
-@@ -1327,12 +1508,27 @@ impl ClientShellState {
+@@ -1327,12 +1486,27 @@ impl ClientShellState {
                  return;
              }
              if let Some(press) = self.tab_press.take() {
@@ -374,7 +438,7 @@ index 0b9326d..cf38300 100644
                  return;
              }
          }
-@@ -1846,38 +2042,16 @@ impl ClientShellState {
+@@ -1846,38 +2020,16 @@ impl ClientShellState {
                  );
              }
              MouseEventKind::ScrollUp if super::contains(self.hits.agent_body, point) => {
@@ -417,7 +481,7 @@ index 0b9326d..cf38300 100644
              }
              MouseEventKind::Down(MouseButton::Left) => {
                  if self.selection.take().is_some() {
-@@ -2250,6 +2424,7 @@ impl ClientShellState {
+@@ -2250,6 +2402,7 @@ impl ClientShellState {
              MouseEventKind::Up(MouseButton::Left | MouseButton::Middle)
              | MouseEventKind::Drag(MouseButton::Left | MouseButton::Middle) => {}
              MouseEventKind::Moved => {
@@ -426,60 +490,63 @@ index 0b9326d..cf38300 100644
                      .hits
                      .panes
 diff --git a/src/client/shell/render.rs b/src/client/shell/render.rs
-index 8038701..bbea0e7 100644
+index 8038701..a160553 100644
 --- a/src/client/shell/render.rs
 +++ b/src/client/shell/render.rs
-@@ -247,6 +247,7 @@ pub(super) struct ShellRenderState<'a> {
+@@ -247,6 +247,8 @@ pub(super) struct ShellRenderState<'a> {
      pub(super) reveal_navigation_workspace: &'a mut bool,
      pub(super) dragged_workspace_id: Option<&'a str>,
      pub(super) workspace_drop_indicator_row: Option<u16>,
 +    pub(super) sidebar_hover: Option<&'a ClientSidebarHoverTarget>,
++    pub(super) hover_bg: ratatui::style::Color,
  }
  
  pub(super) fn render_shell(
-@@ -296,6 +297,7 @@ pub(super) fn render_shell(
+@@ -296,6 +298,8 @@ pub(super) fn render_shell(
                      .selected_workspace_id
                      .map(|target| target.workspace_id.as_str()),
                  &mut hits,
 +                state.sidebar_hover,
++                state.hover_bg,
              );
          } else {
              render_sidebar(
 diff --git a/src/client/shell/sidebar.rs b/src/client/shell/sidebar.rs
-index 161aecd..8bf7e77 100644
+index 161aecd..5cad311 100644
 --- a/src/client/shell/sidebar.rs
 +++ b/src/client/shell/sidebar.rs
-@@ -31,6 +31,7 @@ pub(crate) fn render_collapsed_sidebar(
+@@ -31,6 +31,8 @@ pub(crate) fn render_collapsed_sidebar(
      config: &ClientShellConfig,
      selected_workspace_id: Option<&str>,
      hits: &mut ShellHitMap,
 +    hover: Option<&ClientSidebarHoverTarget>,
++    hover_bg: ratatui::style::Color,
  ) {
      let palette = &config.palette;
      render_sidebar_background(buffer, area, palette);
-@@ -58,6 +59,10 @@ pub(crate) fn render_collapsed_sidebar(
+@@ -58,6 +60,10 @@ pub(crate) fn render_collapsed_sidebar(
              buffer.set_style(rect, Style::default().bg(selection_background));
          } else if workspace.focused {
              buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
 +        } else if hover.is_some_and(|target| {
 +            target.matches_workspace(&ClientEndpointId::Local, &workspace.workspace_id)
 +        }) {
-+            buffer.set_style(rect, Style::default().bg(palette.surface1));
++            buffer.set_style(rect, Style::default().bg(hover_bg));
          }
          let number_style = if selected {
              Style::default()
-@@ -131,6 +136,10 @@ pub(crate) fn render_collapsed_sidebar(
+@@ -131,6 +137,10 @@ pub(crate) fn render_collapsed_sidebar(
          );
          if agent.focused {
              buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
 +        } else if hover
 +            .is_some_and(|target| target.matches_agent(&ClientEndpointId::Local, &pane_id))
 +        {
-+            buffer.set_style(rect, Style::default().bg(palette.surface1));
++            buffer.set_style(rect, Style::default().bg(hover_bg));
          }
          put_text(
              buffer,
-@@ -298,12 +307,17 @@ pub(crate) fn render_sidebar(
+@@ -298,12 +308,17 @@ pub(crate) fn render_sidebar(
              target.matches(state.active_endpoint_id, &workspace.workspace_id)
          });
          let dragged = state.dragged_workspace_id == Some(workspace.workspace_id.as_str());
@@ -493,23 +560,32 @@ index 161aecd..8bf7e77 100644
          } else if workspace.focused {
              buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
 +        } else if hovered {
-+            buffer.set_style(rect, Style::default().bg(palette.surface1));
++            buffer.set_style(rect, Style::default().bg(state.hover_bg));
          }
          render_workspace_rows(
              buffer,
-@@ -421,6 +435,7 @@ pub(crate) fn render_sidebar(
+@@ -421,6 +436,8 @@ pub(crate) fn render_sidebar(
          config,
          state.agent_scroll,
          hits,
 +        state.sidebar_hover,
++        state.hover_bg,
      );
  
      hits.sidebar_toggle = Rect::new(
 diff --git a/src/client/shell/state.rs b/src/client/shell/state.rs
-index 901c5a2..4979509 100644
+index 901c5a2..29756ec 100644
 --- a/src/client/shell/state.rs
 +++ b/src/client/shell/state.rs
-@@ -184,6 +184,44 @@ pub(super) struct ClientTabPress {
+@@ -35,6 +35,7 @@ pub(crate) struct ClientShellConfig {
+     pub(super) theme_name: String,
+     pub(super) theme_runtime: crate::app::state::ThemeRuntimeConfig,
+     pub(super) palette: Palette,
++    pub(super) hover_bg_override: Option<ratatui::style::Color>,
+     pub(super) keybinds: LiveKeybindConfig,
+     pub(super) local_keys: crate::config::KeysConfig,
+     pub(super) keybinding_source: ClientShellKeybindingSource,
+@@ -184,6 +185,44 @@ pub(super) struct ClientTabPress {
      pub(super) start_row: u16,
  }
  
@@ -554,7 +630,7 @@ index 901c5a2..4979509 100644
  pub(super) enum ClientChromeDrag {
      SidebarWidth,
      SidebarSection,
-@@ -854,6 +892,8 @@ pub(crate) struct ClientShellState {
+@@ -854,6 +893,8 @@ pub(crate) struct ClientShellState {
      pub(super) sidebar_section_split_manual: bool,
      pub(super) agent_panel_sort_manual: bool,
      pub(super) last_sidebar_divider_click: Option<std::time::Instant>,
@@ -563,7 +639,16 @@ index 901c5a2..4979509 100644
      pub(super) chrome_drag: Option<ClientChromeDrag>,
      pub(super) workspace_press: Option<ClientWorkspacePress>,
      pub(super) tab_press: Option<ClientTabPress>,
-@@ -1016,6 +1056,8 @@ impl ClientShellState {
+@@ -920,6 +961,8 @@ pub(crate) struct ClientShellState {
+     pub(super) host_appearance: Option<crate::terminal_theme::HostAppearance>,
+     pub(super) host_appearance_explicit: bool,
+     pub(super) host_background: Option<crate::terminal_theme::RgbColor>,
++    pub(super) host_foreground: Option<crate::terminal_theme::RgbColor>,
++    pub(super) omarchy_hover_bg: Option<ratatui::style::Color>,
+     pub(super) local_config_diagnostic: Option<String>,
+     pub(super) config_diagnostic: Option<String>,
+     pub(super) endpoint_error: Option<String>,
+@@ -1016,6 +1059,8 @@ impl ClientShellState {
              sidebar_section_split_manual: preferences.sidebar_section_split.is_some(),
              agent_panel_sort_manual: preferences.agent_panel_sort.is_some(),
              last_sidebar_divider_click: None,
@@ -572,6 +657,115 @@ index 901c5a2..4979509 100644
              chrome_drag: None,
              workspace_press: None,
              tab_press: None,
+@@ -1082,6 +1127,8 @@ impl ClientShellState {
+             host_appearance: None,
+             host_appearance_explicit: false,
+             host_background: None,
++            host_foreground: None,
++            omarchy_hover_bg: None,
+             config_diagnostic: local_config_diagnostic.clone(),
+             local_config_diagnostic,
+             endpoint_error: None,
+@@ -1090,6 +1137,60 @@ impl ClientShellState {
+         }
+     }
+ 
++    /// Background used for the mouse-hover highlight on sidebar rows.
++    ///
++    /// Precedence: explicit `[theme.custom] hover_bg` > the current Omarchy
++    /// theme surface (`selection`, then `muted`, then `lighter_background`) >
++    /// a subtle mix of the host terminal background/foreground > the palette's
++    /// surface inset.
++    pub(super) fn resolved_hover_bg(&self) -> ratatui::style::Color {
++        use ratatui::style::Color;
++        if let Some(color) = self.config.hover_bg_override {
++            return color;
++        }
++        if self.config.theme_name == "terminal" {
++            if let Some(color) = self.omarchy_hover_bg {
++                return color;
++            }
++            return match (self.host_background, self.host_foreground) {
++                (Some(bg), Some(fg)) => mix_rgb(bg, fg, 0.12),
++                (Some(bg), None) => mix_rgb(
++                    bg,
++                    crate::terminal_theme::RgbColor {
++                        r: 255,
++                        g: 255,
++                        b: 255,
++                    },
++                    0.07,
++                ),
++                _ => Color::Indexed(238),
++            };
++        }
++        let palette = &self.config.palette;
++        if palette.surface1 != palette.active_row_bg && palette.surface1 != Color::Reset {
++            palette.surface1
++        } else if palette.surface0 != palette.active_row_bg && palette.surface0 != Color::Reset {
++            palette.surface0
++        } else {
++            Color::Indexed(238)
++        }
++    }
++
++    /// Re-read the current Omarchy theme's hover surface when Herdr is using the
++    /// terminal palette. Returns whether the cached color changed.
++    pub(crate) fn refresh_omarchy_theme(&mut self) -> bool {
++        let next = if self.config.theme_name == "terminal" {
++            omarchy_hover_bg()
++        } else {
++            None
++        };
++        if self.omarchy_hover_bg == next {
++            return false;
++        }
++        self.omarchy_hover_bg = next;
++        true
++    }
++
+     pub(super) fn resume_mobile_switcher_if_ready(&mut self) -> bool {
+         if !self.mobile_switcher_suspended || self.overlay.is_some() {
+             return false;
+@@ -1853,3 +1954,38 @@ impl ClientShellState {
+         self.host_mouse_pixels = None;
+     }
+ }
++
++fn mix_rgb(
++    start: crate::terminal_theme::RgbColor,
++    end: crate::terminal_theme::RgbColor,
++    amount: f32,
++) -> ratatui::style::Color {
++    let amount = amount.clamp(0.0, 1.0);
++    let mix = |a: u8, b: u8| (f32::from(a) * (1.0 - amount) + f32::from(b) * amount).round() as u8;
++    ratatui::style::Color::Rgb(
++        mix(start.r, end.r),
++        mix(start.g, end.g),
++        mix(start.b, end.b),
++    )
++}
++
++/// Read the current Omarchy theme's preferred subtle surface for hover.
++fn omarchy_hover_bg() -> Option<ratatui::style::Color> {
++    #[derive(serde::Deserialize)]
++    struct OmarchyColors {
++        selection: Option<String>,
++        muted: Option<String>,
++        lighter_background: Option<String>,
++    }
++
++    let home = std::env::var_os("HOME")?;
++    let path = std::path::Path::new(&home).join(".local/state/omarchy/current/theme/colors.toml");
++    let contents = std::fs::read_to_string(path).ok()?;
++    let colors: OmarchyColors = toml::from_str(&contents).ok()?;
++    colors
++        .selection
++        .or(colors.muted)
++        .or(colors.lighter_background)
++        .as_deref()
++        .map(crate::config::parse_color)
++}
 diff --git a/src/client/shell/tests/agents_worktrees_notifications.rs b/src/client/shell/tests/agents_worktrees_notifications.rs
 index 5b8b122..5f52fb5 100644
 --- a/src/client/shell/tests/agents_worktrees_notifications.rs
@@ -615,7 +809,7 @@ index 5b8b122..5f52fb5 100644
  
      state.sidebar_collapsed = true;
 diff --git a/src/client/shell/tests/mouse_selection.rs b/src/client/shell/tests/mouse_selection.rs
-index ae4168c..f291a03 100644
+index ae4168c..7baf93f 100644
 --- a/src/client/shell/tests/mouse_selection.rs
 +++ b/src/client/shell/tests/mouse_selection.rs
 @@ -1040,6 +1040,46 @@ fn tab_click_waits_for_release_and_drag_reorders_by_stable_id() {
@@ -665,7 +859,7 @@ index ae4168c..f291a03 100644
  #[test]
  fn tab_drag_clears_its_drop_target_after_leaving_the_tab_row() {
      let mut projected = snapshot();
-@@ -1159,3 +1199,184 @@ fn context_menu_keyboard_and_outside_click_are_client_owned() {
+@@ -1159,3 +1199,325 @@ fn context_menu_keyboard_and_outside_click_are_client_owned() {
      assert!(outside.repaint);
      assert!(state.overlay.is_none());
  }
@@ -685,8 +879,6 @@ index ae4168c..f291a03 100644
 +    state.set_pane_surface(surface());
 +    state.compose(106, 20).expect("three workspaces");
 +
-+    let ws_2 = state.hits.workspaces[1].rect;
-+    let ws_3 = state.hits.workspaces[2].rect;
 +    let point = |kind, rect: Rect| crossterm::event::MouseEvent {
 +        kind,
 +        column: rect.x + 1,
@@ -694,9 +886,13 @@ index ae4168c..f291a03 100644
 +        modifiers: KeyModifiers::empty(),
 +    };
 +
++    let first = state.hits.workspaces[0].rect;
++    let second = state.hits.workspaces[1].rect;
++    let third = state.hits.workspaces[2].rect;
++
 +    let hovered = state.handle_raw_events(vec![RawInputEvent::Mouse(point(
 +        MouseEventKind::Moved,
-+        ws_2,
++        second,
 +    ))]);
 +    assert!(hovered.actions.is_empty(), "hover must not focus");
 +    assert!(matches!(
@@ -707,31 +903,57 @@ index ae4168c..f291a03 100644
 +        }) if workspace_id == "ws_2"
 +    ));
 +
-+    // Scrolling steps from the hovered row (ws_2 -> ws_3).
++    // The wheel steps from the focused workspace (ws_1 -> ws_2), not the
++    // hovered one, and keeps the hover highlight.
 +    let down = state.handle_raw_events(vec![RawInputEvent::Mouse(point(
 +        MouseEventKind::ScrollDown,
-+        ws_2,
++        second,
 +    ))]);
 +    assert!(matches!(
 +        &down.actions[..],
 +        [ClientShellAction::Endpoint { request, .. }]
++            if matches!(&request.method, crate::api::schema::Method::WorkspaceFocus(target) if target.workspace_id == "ws_2")
++    ));
++    assert!(
++        state.sidebar_hover.is_some(),
++        "wheel keeps the hover highlight"
++    );
++
++    // Once the focus update lands, the next step continues from the new focus.
++    let mut update = state.snapshot.as_deref().expect("snapshot").clone();
++    update.revision += 1;
++    update.focused_workspace_id = Some("ws_2".into());
++    for workspace in &mut update.workspaces {
++        workspace.focused = workspace.workspace_id == "ws_2";
++    }
++    state.set_snapshot(Box::new(update));
++    let mut updated_surface = surface();
++    updated_surface.projection_revision = 2;
++    state.set_pane_surface(updated_surface);
++    state.compose(106, 20).expect("focused ws_2");
++    let down_again = state.handle_raw_events(vec![RawInputEvent::Mouse(point(
++        MouseEventKind::ScrollDown,
++        third,
++    ))]);
++    assert!(matches!(
++        &down_again.actions[..],
++        [ClientShellAction::Endpoint { request, .. }]
 +            if matches!(&request.method, crate::api::schema::Method::WorkspaceFocus(target) if target.workspace_id == "ws_3")
 +    ));
-+    assert!(state.sidebar_hover.is_none());
 +
-+    // Re-hover the last row and scroll up to step back.
++    // Hovering the first row while ws_2 is focused still steps from ws_2.
 +    state.handle_raw_events(vec![RawInputEvent::Mouse(point(
 +        MouseEventKind::Moved,
-+        ws_3,
++        first,
 +    ))]);
 +    let up = state.handle_raw_events(vec![RawInputEvent::Mouse(point(
 +        MouseEventKind::ScrollUp,
-+        ws_3,
++        first,
 +    ))]);
 +    assert!(matches!(
 +        &up.actions[..],
 +        [ClientShellAction::Endpoint { request, .. }]
-+            if matches!(&request.method, crate::api::schema::Method::WorkspaceFocus(target) if target.workspace_id == "ws_2")
++            if matches!(&request.method, crate::api::schema::Method::WorkspaceFocus(target) if target.workspace_id == "ws_1")
 +    ));
 +}
 +
@@ -770,14 +992,15 @@ index ae4168c..f291a03 100644
 +    state.set_pane_surface(surface());
 +    state.compose(106, 20).expect("three agents");
 +
-+    let second = state.hits.agents[1].0;
-+    let third = state.hits.agents[2].0;
 +    let point = |kind, rect: Rect| crossterm::event::MouseEvent {
 +        kind,
 +        column: rect.x + 1,
 +        row: rect.y,
 +        modifiers: KeyModifiers::empty(),
 +    };
++    let first = state.hits.agents[0].0;
++    let second = state.hits.agents[1].0;
++    let third = state.hits.agents[2].0;
 +
 +    let hovered = state.handle_raw_events(vec![RawInputEvent::Mouse(point(
 +        MouseEventKind::Moved,
@@ -789,7 +1012,8 @@ index ae4168c..f291a03 100644
 +        Some(ClientSidebarHoverTarget::Agent { ref pane_id, .. }) if pane_id == "pane_2"
 +    ));
 +
-+    // Scrolling steps from the hovered row (pane_2 -> pane_3).
++    // The wheel steps from the focused agent (pane_1 -> pane_2), not the
++    // hovered one, and keeps the hover highlight.
 +    let down = state.handle_raw_events(vec![RawInputEvent::Mouse(point(
 +        MouseEventKind::ScrollDown,
 +        second,
@@ -797,22 +1021,51 @@ index ae4168c..f291a03 100644
 +    assert!(matches!(
 +        &down.actions[..],
 +        [ClientShellAction::Endpoint { request, .. }]
++            if matches!(&request.method, crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_2")
++    ));
++    assert!(
++        state.sidebar_hover.is_some(),
++        "wheel keeps the hover highlight"
++    );
++
++    // Once the focus update lands, the next step continues from the new focus.
++    let mut update = state.snapshot.as_deref().expect("snapshot").clone();
++    update.revision += 1;
++    update.focused_pane_id = Some("pane_2".into());
++    for pane in &mut update.panes {
++        pane.focused = pane.pane_id == "pane_2";
++    }
++    for agent in &mut update.agents {
++        agent.focused = agent.pane_id == "pane_2";
++    }
++    state.set_snapshot(Box::new(update));
++    let mut updated_surface = surface();
++    updated_surface.projection_revision = 2;
++    state.set_pane_surface(updated_surface);
++    state.compose(106, 20).expect("focused pane_2");
++    let down_again = state.handle_raw_events(vec![RawInputEvent::Mouse(point(
++        MouseEventKind::ScrollDown,
++        third,
++    ))]);
++    assert!(matches!(
++        &down_again.actions[..],
++        [ClientShellAction::Endpoint { request, .. }]
 +            if matches!(&request.method, crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_3")
 +    ));
-+    assert!(state.sidebar_hover.is_none());
 +
++    // Hovering the first row while pane_2 is focused still steps from pane_2.
 +    state.handle_raw_events(vec![RawInputEvent::Mouse(point(
 +        MouseEventKind::Moved,
-+        third,
++        first,
 +    ))]);
 +    let up = state.handle_raw_events(vec![RawInputEvent::Mouse(point(
 +        MouseEventKind::ScrollUp,
-+        third,
++        first,
 +    ))]);
 +    assert!(matches!(
 +        &up.actions[..],
 +        [ClientShellAction::Endpoint { request, .. }]
-+            if matches!(&request.method, crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_2")
++            if matches!(&request.method, crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_1")
 +    ));
 +}
 +
@@ -840,13 +1093,131 @@ index ae4168c..f291a03 100644
 +        })]);
 +    assert!(outcome.actions.is_empty(), "hover must not focus");
 +
-+    let surface1 = state.config.palette.surface1;
++    let hover_bg = state.resolved_hover_bg();
 +    let active = state.config.palette.active_row_bg;
 +    let buffer = state
 +        .compose(106, 20)
 +        .expect("hover frame")
 +        .to_ratatui_buffer()
 +        .expect("hover buffer");
-+    assert_eq!(buffer[(ws_2.x + 1, ws_2.y)].bg, surface1);
++    assert_eq!(buffer[(ws_2.x + 1, ws_2.y)].bg, hover_bg);
 +    assert_eq!(buffer[(ws_1.x + 1, ws_1.y)].bg, active);
 +}
++
++#[test]
++fn sidebar_hover_uses_the_omarchy_surface_when_available() {
++    let mut config = Config::default();
++    config.theme.name = Some("terminal".into());
++    let mut projected = snapshot();
++    let mut second = projected.workspaces[0].clone();
++    second.workspace_id = "ws_2".into();
++    second.number = 2;
++    second.focused = false;
++    projected.workspaces.push(second);
++    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
++    state.set_snapshot(Box::new(projected));
++    state.set_pane_surface(surface());
++    state.omarchy_hover_bg = Some(ratatui::style::Color::Rgb(31, 37, 58));
++    state.compose(106, 20).expect("two workspaces");
++
++    let ws_2 = state.hits.workspaces[1].rect;
++    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
++        kind: MouseEventKind::Moved,
++        column: ws_2.x + 1,
++        row: ws_2.y,
++        modifiers: KeyModifiers::empty(),
++    })]);
++    let buffer = state
++        .compose(106, 20)
++        .expect("hover frame")
++        .to_ratatui_buffer()
++        .expect("hover buffer");
++    assert_eq!(
++        buffer[(ws_2.x + 1, ws_2.y)].bg,
++        ratatui::style::Color::Rgb(31, 37, 58)
++    );
++    assert_ne!(
++        buffer[(ws_2.x + 1, ws_2.y)].bg,
++        state.config.palette.active_row_bg
++    );
++}
++
++#[test]
++fn sidebar_hover_derives_from_host_colors_without_omarchy() {
++    let mut config = Config::default();
++    config.theme.name = Some("terminal".into());
++    let mut projected = snapshot();
++    let mut second = projected.workspaces[0].clone();
++    second.workspace_id = "ws_2".into();
++    second.number = 2;
++    second.focused = false;
++    projected.workspaces.push(second);
++    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
++    state.set_snapshot(Box::new(projected));
++    state.set_pane_surface(surface());
++    state.omarchy_hover_bg = None;
++    state.host_background = Some(crate::terminal_theme::RgbColor {
++        r: 10,
++        g: 12,
++        b: 22,
++    });
++    state.host_foreground = Some(crate::terminal_theme::RgbColor {
++        r: 221,
++        g: 247,
++        b: 255,
++    });
++    state.compose(106, 20).expect("two workspaces");
++
++    let ws_2 = state.hits.workspaces[1].rect;
++    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
++        kind: MouseEventKind::Moved,
++        column: ws_2.x + 1,
++        row: ws_2.y,
++        modifiers: KeyModifiers::empty(),
++    })]);
++    let buffer = state
++        .compose(106, 20)
++        .expect("hover frame")
++        .to_ratatui_buffer()
++        .expect("hover buffer");
++    assert_eq!(
++        buffer[(ws_2.x + 1, ws_2.y)].bg,
++        ratatui::style::Color::Rgb(35, 40, 50)
++    );
++}
+diff --git a/src/config/theme.rs b/src/config/theme.rs
+index cb9e349..4b88458 100644
+--- a/src/config/theme.rs
++++ b/src/config/theme.rs
+@@ -107,6 +107,7 @@ pub struct CustomThemeColors {
+     pub selection_bg: Option<String>,
+     pub surface0: Option<String>,
+     pub surface1: Option<String>,
++    pub hover_bg: Option<String>,
+     pub surface_dim: Option<String>,
+     pub overlay0: Option<String>,
+     pub overlay1: Option<String>,
+@@ -136,6 +137,7 @@ pub struct ModeThemeColors {
+     pub selection_bg: Option<String>,
+     pub surface0: Option<String>,
+     pub surface1: Option<String>,
++    pub hover_bg: Option<String>,
+     pub surface_dim: Option<String>,
+     pub overlay0: Option<String>,
+     pub overlay1: Option<String>,
+@@ -297,6 +299,7 @@ panel_bg = "#1e1e2e"
+ sidebar_bg = "#181825"
+ active_row_bg = "#313244"
+ selection_bg = "#45475a"
++hover_bg = "#292c3c"
+ accent = "#ff79c6"
+ red = "rgb(255, 85, 85)"
+ "##;
+@@ -307,6 +310,7 @@ red = "rgb(255, 85, 85)"
+         assert_eq!(custom.sidebar_bg.as_deref(), Some("#181825"));
+         assert_eq!(custom.active_row_bg.as_deref(), Some("#313244"));
+         assert_eq!(custom.selection_bg.as_deref(), Some("#45475a"));
++        assert_eq!(custom.hover_bg.as_deref(), Some("#292c3c"));
+         assert_eq!(custom.accent.as_deref(), Some("#ff79c6"));
+         assert_eq!(custom.red.as_deref(), Some("rgb(255, 85, 85)"));
+         assert!(custom.green.is_none());
