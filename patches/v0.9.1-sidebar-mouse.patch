@@ -1,8 +1,158 @@
+diff --git a/src/client/shell/agent_sidebar.rs b/src/client/shell/agent_sidebar.rs
+index e43ab8c..361be4f 100644
+--- a/src/client/shell/agent_sidebar.rs
++++ b/src/client/shell/agent_sidebar.rs
+@@ -56,6 +56,7 @@ pub(super) fn render_agent_panel(
+     config: &ClientShellConfig,
+     agent_scroll: &mut usize,
+     hits: &mut ShellHitMap,
++    hover: Option<&ClientSidebarHoverTarget>,
+ ) {
+     if !render_agent_panel_header(
+         buffer,
+@@ -82,7 +83,9 @@ pub(super) fn render_agent_panel(
+         |row| row.rows.len(),
+         |buffer, rect, row, hits| {
+             hits.agents.push((rect, row.pane_id.clone()));
+-            render_agent_row(buffer, rect, row, config);
++            let hovered = hover
++                .is_some_and(|target| target.matches_agent(&ClientEndpointId::Local, &row.pane_id));
++            render_agent_row(buffer, rect, row, config, hovered);
+         },
+     );
+ }
+@@ -323,10 +326,13 @@ pub(super) fn render_agent_row(
+     rect: Rect,
+     row: &AgentRow,
+     config: &ClientShellConfig,
++    hovered: bool,
+ ) {
+     let palette = &config.palette;
+     let row_style = if row.focused {
+         Style::default().bg(palette.active_row_bg)
++    } else if hovered {
++        Style::default().bg(palette.surface1)
+     } else {
+         Style::default()
+     };
+diff --git a/src/client/shell/composition.rs b/src/client/shell/composition.rs
+index e0888d0..9738ea1 100644
+--- a/src/client/shell/composition.rs
++++ b/src/client/shell/composition.rs
+@@ -69,6 +69,7 @@ impl ClientShellState {
+             reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
+             dragged_workspace_id: None,
+             workspace_drop_indicator_row: None,
++            sidebar_hover: self.sidebar_hover.as_ref(),
+         };
+         if let Some(snapshot) = local_snapshot {
+             render::render_sidebar(
+@@ -204,6 +205,7 @@ impl ClientShellState {
+                 reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
+                 dragged_workspace_id,
+                 workspace_drop_indicator_row,
++                sidebar_hover: self.sidebar_hover.as_ref(),
+             },
+         );
+         self.hits.panes = surface
+diff --git a/src/client/shell/endpoint_agents.rs b/src/client/shell/endpoint_agents.rs
+index 3cc106b..5792aea 100644
+--- a/src/client/shell/endpoint_agents.rs
++++ b/src/client/shell/endpoint_agents.rs
+@@ -8,12 +8,17 @@ pub(super) fn render_collapsed(
+     active_endpoint_id: &ClientEndpointId,
+     config: &ClientShellConfig,
+     hits: &mut ShellHitMap,
++    hover: Option<&ClientSidebarHoverTarget>,
+ ) {
+     let rows = agent_rows(endpoints, active_endpoint_id, config);
+     for (index, row) in rows.into_iter().take(area.height as usize).enumerate() {
+         let rect = Rect::new(area.x, area.y + index as u16, area.width, 1);
++        let hovered =
++            hover.is_some_and(|target| target.matches_agent(&row.endpoint_id, &row.agent.pane_id));
+         if row.agent.focused {
+             buffer.set_style(rect, Style::default().bg(config.palette.active_row_bg));
++        } else if hovered {
++            buffer.set_style(rect, Style::default().bg(config.palette.surface1));
+         }
+         let initial = row.machine_label.chars().next().unwrap_or('?');
+         put_text(
+@@ -51,6 +56,7 @@ pub(super) fn render_expanded(
+     config: &ClientShellConfig,
+     agent_scroll: &mut usize,
+     hits: &mut ShellHitMap,
++    hover: Option<&ClientSidebarHoverTarget>,
+ ) {
+     if !super::agent_sidebar::render_agent_panel_header(
+         buffer,
+@@ -72,7 +78,9 @@ pub(super) fn render_expanded(
+         hits,
+         |row| row.agent.rows.len(),
+         |buffer, rect, row, hits| {
+-            super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config);
++            let hovered = hover
++                .is_some_and(|target| target.matches_agent(&row.endpoint_id, &row.agent.pane_id));
++            super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config, hovered);
+             if row.stale {
+                 buffer.set_style(
+                     rect,
+diff --git a/src/client/shell/endpoint_sidebar.rs b/src/client/shell/endpoint_sidebar.rs
+index 34d2ccd..dc35b2a 100644
+--- a/src/client/shell/endpoint_sidebar.rs
++++ b/src/client/shell/endpoint_sidebar.rs
+@@ -120,6 +120,9 @@ pub(super) fn render_collapsed(
+             let selected = state.selected_workspace_id.is_some_and(|target| {
+                 target.matches(&endpoint.endpoint_id, &workspace.workspace_id)
+             });
++            let hovered = state.sidebar_hover.is_some_and(|target| {
++                target.matches_workspace(&endpoint.endpoint_id, &workspace.workspace_id)
++            });
+             let selection_background = if palette.selection_bg == ratatui::style::Color::Reset {
+                 palette.active_row_bg
+             } else {
+@@ -129,6 +132,8 @@ pub(super) fn render_collapsed(
+                 buffer.set_style(rect, Style::default().bg(selection_background));
+             } else if focused {
+                 buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
++            } else if hovered {
++                buffer.set_style(rect, Style::default().bg(palette.surface1));
+             }
+             let stale = endpoint.status != ClientEndpointStatus::Online;
+             let number = format!(" {}", workspace.number);
+@@ -193,6 +198,7 @@ pub(super) fn render_collapsed(
+         state.active_endpoint_id,
+         config,
+         hits,
++        state.sidebar_hover,
+     );
+     hits.sidebar_toggle = if area.is_empty() || workspace_area.width == 0 {
+         Rect::default()
+@@ -462,6 +468,12 @@ pub(super) fn render_expanded(
+                 if selected && palette.selection_bg == ratatui::style::Color::Reset {
+                     buffer.set_style(nested, Style::default().bg(palette.active_row_bg));
+                 }
++                let hovered = state.sidebar_hover.is_some_and(|target| {
++                    target.matches_workspace(&endpoint.endpoint_id, &workspace.workspace_id)
++                });
++                if hovered && !selected && !(endpoint_active && workspace.focused) {
++                    buffer.set_style(rect, Style::default().bg(palette.surface1));
++                }
+                 if endpoint.status != ClientEndpointStatus::Online {
+                     buffer.set_style(
+                         rect,
+@@ -543,6 +555,7 @@ pub(super) fn render_expanded(
+         config,
+         state.agent_scroll,
+         hits,
++        state.sidebar_hover,
+     );
+     hits.sidebar_toggle = Rect::new(
+         area.right().saturating_sub(2),
 diff --git a/src/client/shell/mouse.rs b/src/client/shell/mouse.rs
-index 0b9326d..7161e38 100644
+index 0b9326d..cf38300 100644
 --- a/src/client/shell/mouse.rs
 +++ b/src/client/shell/mouse.rs
-@@ -35,6 +35,92 @@ impl ClientShellState {
+@@ -35,6 +35,187 @@ impl ClientShellState {
          }
      }
  
@@ -62,32 +212,127 @@ index 0b9326d..7161e38 100644
 +        if self.mode != ClientShellMode::Terminal || self.sidebar_hover_interaction_active() {
 +            return;
 +        }
-+        let Some(target) = self.sidebar_hover_target_at((mouse.column, mouse.row)) else {
-+            self.sidebar_hover = None;
-+            return;
-+        };
-+        if self.sidebar_hover.as_ref() == Some(&target) {
++        let target = self.sidebar_hover_target_at((mouse.column, mouse.row));
++        if self.sidebar_hover == target {
 +            return;
 +        }
-+        self.sidebar_hover = Some(target.clone());
-+        let (endpoint_id, focus_target) = match target {
-+            ClientSidebarHoverTarget::Workspace {
-+                endpoint_id,
-+                workspace_id,
-+            } => (
-+                endpoint_id,
-+                ClientEndpointFocusTarget::Workspace(workspace_id),
-+            ),
-+            ClientSidebarHoverTarget::Agent {
-+                endpoint_id,
-+                pane_id,
-+            } => (endpoint_id, ClientEndpointFocusTarget::Pane(pane_id)),
-+        };
-+        // Hovering a row on another machine must not silently switch machines.
-+        if endpoint_id != self.active_endpoint_id {
++        // Hover only highlights the row; it never focuses or switches machines.
++        self.sidebar_hover = target;
++        outcome.repaint = true;
++    }
++
++    fn sidebar_step_workspace(&mut self, delta: isize, outcome: &mut ClientShellInput) {
++        if self.hits.workspaces.is_empty() {
 +            return;
 +        }
-+        if self.focus_or_activate(endpoint_id, focus_target, outcome) {
++        let anchor = self
++            .sidebar_hover
++            .as_ref()
++            .and_then(|hover| match hover {
++                ClientSidebarHoverTarget::Workspace {
++                    endpoint_id,
++                    workspace_id,
++                } => self.hits.workspaces.iter().position(|hit| {
++                    &hit.endpoint_id == endpoint_id && &hit.workspace_id == workspace_id
++                }),
++                ClientSidebarHoverTarget::Agent { .. } => None,
++            })
++            .or_else(|| {
++                let focused = self.snapshot.as_deref()?.focused_workspace_id.as_deref()?;
++                self.hits.workspaces.iter().position(|hit| {
++                    hit.endpoint_id == self.active_endpoint_id && hit.workspace_id == focused
++                })
++            })
++            .unwrap_or(0);
++        let next =
++            (anchor as isize + delta).rem_euclid(self.hits.workspaces.len() as isize) as usize;
++        let (endpoint_id, workspace_id) = {
++            let hit = &self.hits.workspaces[next];
++            (hit.endpoint_id.clone(), hit.workspace_id.clone())
++        };
++        let already_focused = self.snapshot.as_deref().is_some_and(|snapshot| {
++            snapshot.focused_workspace_id.as_deref() == Some(workspace_id.as_str())
++                && endpoint_id == self.active_endpoint_id
++        });
++        if already_focused {
++            return;
++        }
++        self.sidebar_hover = None;
++        self.reveal_workspace(&workspace_id);
++        if self.focus_or_activate(
++            endpoint_id,
++            ClientEndpointFocusTarget::Workspace(workspace_id),
++            outcome,
++        ) {
++            outcome.repaint = true;
++        }
++    }
++
++    fn sidebar_agent_order(&self) -> Vec<(ClientEndpointId, String)> {
++        if !self.hits.endpoint_agents.is_empty() {
++            self.hits
++                .endpoint_agents
++                .iter()
++                .map(|(_, endpoint_id, pane_id)| (endpoint_id.clone(), pane_id.clone()))
++                .collect()
++        } else {
++            self.hits
++                .agents
++                .iter()
++                .map(|(_, pane_id)| (self.active_endpoint_id.clone(), pane_id.clone()))
++                .collect()
++        }
++    }
++
++    fn sidebar_step_agent(&mut self, delta: isize, outcome: &mut ClientShellInput) {
++        let order = self.sidebar_agent_order();
++        if order.is_empty() {
++            return;
++        }
++        let anchor = self
++            .sidebar_hover
++            .as_ref()
++            .and_then(|hover| match hover {
++                ClientSidebarHoverTarget::Agent {
++                    endpoint_id,
++                    pane_id,
++                } => order
++                    .iter()
++                    .position(|(candidate_endpoint, candidate_pane)| {
++                        candidate_endpoint == endpoint_id && candidate_pane == pane_id
++                    }),
++                ClientSidebarHoverTarget::Workspace { .. } => None,
++            })
++            .or_else(|| {
++                let focused = self.snapshot.as_deref()?.focused_pane_id.as_deref()?;
++                order.iter().position(|(endpoint_id, pane_id)| {
++                    endpoint_id == &self.active_endpoint_id && pane_id == focused
++                })
++            })
++            .unwrap_or(0);
++        let next = (anchor as isize + delta).rem_euclid(order.len() as isize) as usize;
++        let (endpoint_id, pane_id) = order[next].clone();
++        let already_focused = self.snapshot.as_deref().is_some_and(|snapshot| {
++            snapshot.focused_pane_id.as_deref() == Some(pane_id.as_str())
++                && endpoint_id == self.active_endpoint_id
++        });
++        if already_focused {
++            return;
++        }
++        if !self
++            .hits
++            .agents
++            .iter()
++            .any(|(_, visible)| visible == &pane_id)
++        {
++            self.agent_scroll = next.min(self.hits.agent_max_scroll);
++        }
++        self.sidebar_hover = None;
++        if self.focus_or_activate(
++            endpoint_id,
++            ClientEndpointFocusTarget::Pane(pane_id),
++            outcome,
++        ) {
 +            outcome.repaint = true;
 +        }
 +    }
@@ -95,7 +340,7 @@ index 0b9326d..7161e38 100644
      fn pane_scrollbar_offset(
          hit: &PaneHit,
          row: u16,
-@@ -1327,12 +1413,27 @@ impl ClientShellState {
+@@ -1327,12 +1508,27 @@ impl ClientShellState {
                  return;
              }
              if let Some(press) = self.tab_press.take() {
@@ -129,7 +374,7 @@ index 0b9326d..7161e38 100644
                  return;
              }
          }
-@@ -1846,38 +1947,30 @@ impl ClientShellState {
+@@ -1846,38 +2042,16 @@ impl ClientShellState {
                  );
              }
              MouseEventKind::ScrollUp if super::contains(self.hits.agent_body, point) => {
@@ -138,10 +383,7 @@ index 0b9326d..7161e38 100644
 -                    self.agent_scroll = next;
 -                    outcome.repaint = true;
 -                }
-+                self.record_binding(
-+                    crate::input::KeybindMatch::Action(crate::input::KeybindAction::PreviousAgent),
-+                    outcome,
-+                );
++                self.sidebar_step_agent(-1, outcome);
              }
              MouseEventKind::ScrollDown if super::contains(self.hits.agent_body, point) => {
 -                let next = self
@@ -152,10 +394,7 @@ index 0b9326d..7161e38 100644
 -                    self.agent_scroll = next;
 -                    outcome.repaint = true;
 -                }
-+                self.record_binding(
-+                    crate::input::KeybindMatch::Action(crate::input::KeybindAction::NextAgent),
-+                    outcome,
-+                );
++                self.sidebar_step_agent(1, outcome);
              }
              MouseEventKind::ScrollUp if super::contains(self.hits.workspace_body, point) => {
 -                let next = self.workspace_scroll.saturating_sub(1);
@@ -163,12 +402,7 @@ index 0b9326d..7161e38 100644
 -                    self.workspace_scroll = next;
 -                    outcome.repaint = true;
 -                }
-+                self.record_binding(
-+                    crate::input::KeybindMatch::Action(
-+                        crate::input::KeybindAction::PreviousWorkspace,
-+                    ),
-+                    outcome,
-+                );
++                self.sidebar_step_workspace(-1, outcome);
              }
              MouseEventKind::ScrollDown if super::contains(self.hits.workspace_body, point) => {
 -                let next = self
@@ -179,14 +413,11 @@ index 0b9326d..7161e38 100644
 -                    self.workspace_scroll = next;
 -                    outcome.repaint = true;
 -                }
-+                self.record_binding(
-+                    crate::input::KeybindMatch::Action(crate::input::KeybindAction::NextWorkspace),
-+                    outcome,
-+                );
++                self.sidebar_step_workspace(1, outcome);
              }
              MouseEventKind::Down(MouseButton::Left) => {
                  if self.selection.take().is_some() {
-@@ -2250,6 +2343,7 @@ impl ClientShellState {
+@@ -2250,6 +2424,7 @@ impl ClientShellState {
              MouseEventKind::Up(MouseButton::Left | MouseButton::Middle)
              | MouseEventKind::Drag(MouseButton::Left | MouseButton::Middle) => {}
              MouseEventKind::Moved => {
@@ -194,11 +425,91 @@ index 0b9326d..7161e38 100644
                  if let Some(hit) = self
                      .hits
                      .panes
+diff --git a/src/client/shell/render.rs b/src/client/shell/render.rs
+index 8038701..bbea0e7 100644
+--- a/src/client/shell/render.rs
++++ b/src/client/shell/render.rs
+@@ -247,6 +247,7 @@ pub(super) struct ShellRenderState<'a> {
+     pub(super) reveal_navigation_workspace: &'a mut bool,
+     pub(super) dragged_workspace_id: Option<&'a str>,
+     pub(super) workspace_drop_indicator_row: Option<u16>,
++    pub(super) sidebar_hover: Option<&'a ClientSidebarHoverTarget>,
+ }
+ 
+ pub(super) fn render_shell(
+@@ -296,6 +297,7 @@ pub(super) fn render_shell(
+                     .selected_workspace_id
+                     .map(|target| target.workspace_id.as_str()),
+                 &mut hits,
++                state.sidebar_hover,
+             );
+         } else {
+             render_sidebar(
+diff --git a/src/client/shell/sidebar.rs b/src/client/shell/sidebar.rs
+index 161aecd..8bf7e77 100644
+--- a/src/client/shell/sidebar.rs
++++ b/src/client/shell/sidebar.rs
+@@ -31,6 +31,7 @@ pub(crate) fn render_collapsed_sidebar(
+     config: &ClientShellConfig,
+     selected_workspace_id: Option<&str>,
+     hits: &mut ShellHitMap,
++    hover: Option<&ClientSidebarHoverTarget>,
+ ) {
+     let palette = &config.palette;
+     render_sidebar_background(buffer, area, palette);
+@@ -58,6 +59,10 @@ pub(crate) fn render_collapsed_sidebar(
+             buffer.set_style(rect, Style::default().bg(selection_background));
+         } else if workspace.focused {
+             buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
++        } else if hover.is_some_and(|target| {
++            target.matches_workspace(&ClientEndpointId::Local, &workspace.workspace_id)
++        }) {
++            buffer.set_style(rect, Style::default().bg(palette.surface1));
+         }
+         let number_style = if selected {
+             Style::default()
+@@ -131,6 +136,10 @@ pub(crate) fn render_collapsed_sidebar(
+         );
+         if agent.focused {
+             buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
++        } else if hover
++            .is_some_and(|target| target.matches_agent(&ClientEndpointId::Local, &pane_id))
++        {
++            buffer.set_style(rect, Style::default().bg(palette.surface1));
+         }
+         put_text(
+             buffer,
+@@ -298,12 +307,17 @@ pub(crate) fn render_sidebar(
+             target.matches(state.active_endpoint_id, &workspace.workspace_id)
+         });
+         let dragged = state.dragged_workspace_id == Some(workspace.workspace_id.as_str());
++        let hovered = state.sidebar_hover.is_some_and(|hover| {
++            hover.matches_workspace(&ClientEndpointId::Local, &workspace.workspace_id)
++        });
+         if selected {
+             buffer.set_style(rect, Style::default().bg(palette.selection_bg));
+         } else if dragged {
+             buffer.set_style(rect, Style::default().bg(palette.surface1));
+         } else if workspace.focused {
+             buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
++        } else if hovered {
++            buffer.set_style(rect, Style::default().bg(palette.surface1));
+         }
+         render_workspace_rows(
+             buffer,
+@@ -421,6 +435,7 @@ pub(crate) fn render_sidebar(
+         config,
+         state.agent_scroll,
+         hits,
++        state.sidebar_hover,
+     );
+ 
+     hits.sidebar_toggle = Rect::new(
 diff --git a/src/client/shell/state.rs b/src/client/shell/state.rs
-index 901c5a2..d27ff6a 100644
+index 901c5a2..4979509 100644
 --- a/src/client/shell/state.rs
 +++ b/src/client/shell/state.rs
-@@ -184,6 +184,18 @@ pub(super) struct ClientTabPress {
+@@ -184,6 +184,44 @@ pub(super) struct ClientTabPress {
      pub(super) start_row: u16,
  }
  
@@ -214,10 +525,36 @@ index 901c5a2..d27ff6a 100644
 +    },
 +}
 +
++impl ClientSidebarHoverTarget {
++    pub(super) fn matches_workspace(
++        &self,
++        endpoint_id: &ClientEndpointId,
++        workspace_id: &str,
++    ) -> bool {
++        matches!(
++            self,
++            Self::Workspace {
++                endpoint_id: target_endpoint,
++                workspace_id: target_workspace,
++            } if target_endpoint == endpoint_id && target_workspace == workspace_id
++        )
++    }
++
++    pub(super) fn matches_agent(&self, endpoint_id: &ClientEndpointId, pane_id: &str) -> bool {
++        matches!(
++            self,
++            Self::Agent {
++                endpoint_id: target_endpoint,
++                pane_id: target_pane,
++            } if target_endpoint == endpoint_id && target_pane == pane_id
++        )
++    }
++}
++
  pub(super) enum ClientChromeDrag {
      SidebarWidth,
      SidebarSection,
-@@ -854,6 +866,8 @@ pub(crate) struct ClientShellState {
+@@ -854,6 +892,8 @@ pub(crate) struct ClientShellState {
      pub(super) sidebar_section_split_manual: bool,
      pub(super) agent_panel_sort_manual: bool,
      pub(super) last_sidebar_divider_click: Option<std::time::Instant>,
@@ -226,7 +563,7 @@ index 901c5a2..d27ff6a 100644
      pub(super) chrome_drag: Option<ClientChromeDrag>,
      pub(super) workspace_press: Option<ClientWorkspacePress>,
      pub(super) tab_press: Option<ClientTabPress>,
-@@ -1016,6 +1030,8 @@ impl ClientShellState {
+@@ -1016,6 +1056,8 @@ impl ClientShellState {
              sidebar_section_split_manual: preferences.sidebar_section_split.is_some(),
              agent_panel_sort_manual: preferences.agent_panel_sort.is_some(),
              last_sidebar_divider_click: None,
@@ -278,7 +615,7 @@ index 5b8b122..5f52fb5 100644
  
      state.sidebar_collapsed = true;
 diff --git a/src/client/shell/tests/mouse_selection.rs b/src/client/shell/tests/mouse_selection.rs
-index ae4168c..5916d7f 100644
+index ae4168c..f291a03 100644
 --- a/src/client/shell/tests/mouse_selection.rs
 +++ b/src/client/shell/tests/mouse_selection.rs
 @@ -1040,6 +1040,46 @@ fn tab_click_waits_for_release_and_drag_reorders_by_stable_id() {
@@ -328,7 +665,7 @@ index ae4168c..5916d7f 100644
  #[test]
  fn tab_drag_clears_its_drop_target_after_leaving_the_tab_row() {
      let mut projected = snapshot();
-@@ -1159,3 +1199,135 @@ fn context_menu_keyboard_and_outside_click_are_client_owned() {
+@@ -1159,3 +1199,184 @@ fn context_menu_keyboard_and_outside_click_are_client_owned() {
      assert!(outside.repaint);
      assert!(state.overlay.is_none());
  }
@@ -348,7 +685,6 @@ index ae4168c..5916d7f 100644
 +    state.set_pane_surface(surface());
 +    state.compose(106, 20).expect("three workspaces");
 +
-+    let ws_1 = state.hits.workspaces[0].rect;
 +    let ws_2 = state.hits.workspaces[1].rect;
 +    let ws_3 = state.hits.workspaces[2].rect;
 +    let point = |kind, rect: Rect| crossterm::event::MouseEvent {
@@ -362,22 +698,32 @@ index ae4168c..5916d7f 100644
 +        MouseEventKind::Moved,
 +        ws_2,
 +    ))]);
++    assert!(hovered.actions.is_empty(), "hover must not focus");
 +    assert!(matches!(
-+        &hovered.actions[..],
-+        [ClientShellAction::Endpoint { request, .. }]
-+            if matches!(&request.method, crate::api::schema::Method::WorkspaceFocus(target) if target.workspace_id == "ws_2")
++        state.sidebar_hover,
++        Some(ClientSidebarHoverTarget::Workspace {
++            ref workspace_id,
++            ..
++        }) if workspace_id == "ws_2"
 +    ));
 +
++    // Scrolling steps from the hovered row (ws_2 -> ws_3).
 +    let down = state.handle_raw_events(vec![RawInputEvent::Mouse(point(
 +        MouseEventKind::ScrollDown,
-+        ws_1,
++        ws_2,
 +    ))]);
 +    assert!(matches!(
 +        &down.actions[..],
 +        [ClientShellAction::Endpoint { request, .. }]
-+            if matches!(&request.method, crate::api::schema::Method::WorkspaceFocus(target) if target.workspace_id == "ws_2")
++            if matches!(&request.method, crate::api::schema::Method::WorkspaceFocus(target) if target.workspace_id == "ws_3")
 +    ));
++    assert!(state.sidebar_hover.is_none());
 +
++    // Re-hover the last row and scroll up to step back.
++    state.handle_raw_events(vec![RawInputEvent::Mouse(point(
++        MouseEventKind::Moved,
++        ws_3,
++    ))]);
 +    let up = state.handle_raw_events(vec![RawInputEvent::Mouse(point(
 +        MouseEventKind::ScrollUp,
 +        ws_3,
@@ -385,7 +731,7 @@ index ae4168c..5916d7f 100644
 +    assert!(matches!(
 +        &up.actions[..],
 +        [ClientShellAction::Endpoint { request, .. }]
-+            if matches!(&request.method, crate::api::schema::Method::WorkspaceFocus(target) if target.workspace_id == "ws_3")
++            if matches!(&request.method, crate::api::schema::Method::WorkspaceFocus(target) if target.workspace_id == "ws_2")
 +    ));
 +}
 +
@@ -424,7 +770,6 @@ index ae4168c..5916d7f 100644
 +    state.set_pane_surface(surface());
 +    state.compose(106, 20).expect("three agents");
 +
-+    let first = state.hits.agents[0].0;
 +    let second = state.hits.agents[1].0;
 +    let third = state.hits.agents[2].0;
 +    let point = |kind, rect: Rect| crossterm::event::MouseEvent {
@@ -438,22 +783,28 @@ index ae4168c..5916d7f 100644
 +        MouseEventKind::Moved,
 +        second,
 +    ))]);
++    assert!(hovered.actions.is_empty(), "hover must not focus");
 +    assert!(matches!(
-+        &hovered.actions[..],
-+        [ClientShellAction::Endpoint { request, .. }]
-+            if matches!(&request.method, crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_2")
++        state.sidebar_hover,
++        Some(ClientSidebarHoverTarget::Agent { ref pane_id, .. }) if pane_id == "pane_2"
 +    ));
 +
++    // Scrolling steps from the hovered row (pane_2 -> pane_3).
 +    let down = state.handle_raw_events(vec![RawInputEvent::Mouse(point(
 +        MouseEventKind::ScrollDown,
-+        first,
++        second,
 +    ))]);
 +    assert!(matches!(
 +        &down.actions[..],
 +        [ClientShellAction::Endpoint { request, .. }]
-+            if matches!(&request.method, crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_2")
++            if matches!(&request.method, crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_3")
 +    ));
++    assert!(state.sidebar_hover.is_none());
 +
++    state.handle_raw_events(vec![RawInputEvent::Mouse(point(
++        MouseEventKind::Moved,
++        third,
++    ))]);
 +    let up = state.handle_raw_events(vec![RawInputEvent::Mouse(point(
 +        MouseEventKind::ScrollUp,
 +        third,
@@ -461,6 +812,41 @@ index ae4168c..5916d7f 100644
 +    assert!(matches!(
 +        &up.actions[..],
 +        [ClientShellAction::Endpoint { request, .. }]
-+            if matches!(&request.method, crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_3")
++            if matches!(&request.method, crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_2")
 +    ));
++}
++
++#[test]
++fn sidebar_hover_paints_the_hovered_row_without_selecting() {
++    let mut projected = snapshot();
++    let mut second = projected.workspaces[0].clone();
++    second.workspace_id = "ws_2".into();
++    second.number = 2;
++    second.focused = false;
++    projected.workspaces.push(second);
++    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
++    state.set_snapshot(Box::new(projected));
++    state.set_pane_surface(surface());
++    state.compose(106, 20).expect("two workspaces");
++
++    let ws_1 = state.hits.workspaces[0].rect;
++    let ws_2 = state.hits.workspaces[1].rect;
++    let outcome =
++        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
++            kind: MouseEventKind::Moved,
++            column: ws_2.x + 1,
++            row: ws_2.y,
++            modifiers: KeyModifiers::empty(),
++        })]);
++    assert!(outcome.actions.is_empty(), "hover must not focus");
++
++    let surface1 = state.config.palette.surface1;
++    let active = state.config.palette.active_row_bg;
++    let buffer = state
++        .compose(106, 20)
++        .expect("hover frame")
++        .to_ratatui_buffer()
++        .expect("hover buffer");
++    assert_eq!(buffer[(ws_2.x + 1, ws_2.y)].bg, surface1);
++    assert_eq!(buffer[(ws_1.x + 1, ws_1.y)].bg, active);
 +}

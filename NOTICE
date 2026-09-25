@@ -8,6 +8,12 @@ Modified files in the patched work tree:
 
 - src/client/shell/mouse.rs
 - src/client/shell/state.rs
+- src/client/shell/composition.rs
+- src/client/shell/render.rs
+- src/client/shell/sidebar.rs
+- src/client/shell/agent_sidebar.rs
+- src/client/shell/endpoint_sidebar.rs
+- src/client/shell/endpoint_agents.rs
 - src/client/shell/tests/mouse_selection.rs
 - src/client/shell/tests/agents_worktrees_notifications.rs
 
