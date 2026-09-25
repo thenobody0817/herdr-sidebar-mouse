@@ -1,0 +1,15 @@
+This distribution contains a patch against Herdr.
+
+Herdr
+Copyright the Herdr contributors
+Licensed under the Apache License, Version 2.0.
+
+Modified files in the patched work tree:
+
+- src/client/shell/mouse.rs
+- src/client/shell/state.rs
+- src/client/shell/tests/mouse_selection.rs
+- src/client/shell/tests/agents_worktrees_notifications.rs
+
+The modifications are provided as a patch only. They are unofficial and are
+not endorsed by or affiliated with the Herdr project.

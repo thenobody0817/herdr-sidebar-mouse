@@ -1,0 +1,466 @@
+diff --git a/src/client/shell/mouse.rs b/src/client/shell/mouse.rs
+index 0b9326d..7161e38 100644
+--- a/src/client/shell/mouse.rs
++++ b/src/client/shell/mouse.rs
+@@ -35,6 +35,92 @@ impl ClientShellState {
+         }
+     }
+ 
++    fn sidebar_hover_target_at(&self, point: (u16, u16)) -> Option<ClientSidebarHoverTarget> {
++        if self.sidebar_collapsed {
++            return None;
++        }
++        if let Some((endpoint_id, pane_id)) = self
++            .hits
++            .endpoint_agents
++            .iter()
++            .find(|(rect, _, _)| super::contains(*rect, point))
++            .map(|(_, endpoint_id, pane_id)| (endpoint_id.clone(), pane_id.clone()))
++        {
++            return Some(ClientSidebarHoverTarget::Agent {
++                endpoint_id,
++                pane_id,
++            });
++        }
++        if let Some((_, pane_id)) = self
++            .hits
++            .agents
++            .iter()
++            .find(|(rect, _)| super::contains(*rect, point))
++        {
++            return Some(ClientSidebarHoverTarget::Agent {
++                endpoint_id: self.active_endpoint_id.clone(),
++                pane_id: pane_id.clone(),
++            });
++        }
++        self.hits
++            .workspaces
++            .iter()
++            .find(|hit| super::contains(hit.rect, point))
++            .map(|hit| ClientSidebarHoverTarget::Workspace {
++                endpoint_id: hit.endpoint_id.clone(),
++                workspace_id: hit.workspace_id.clone(),
++            })
++    }
++
++    fn sidebar_hover_interaction_active(&self) -> bool {
++        self.chrome_drag.is_some()
++            || self.workspace_press.is_some()
++            || self.tab_press.is_some()
++            || self.pane_mouse_gesture.is_some()
++            || self
++                .word_selection_gesture
++                .as_ref()
++                .is_some_and(|gesture| !gesture.released)
++            || self
++                .selection
++                .as_ref()
++                .is_some_and(crate::selection::Selection::is_dragging)
++    }
++
++    fn hover_sidebar(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
++        if self.mode != ClientShellMode::Terminal || self.sidebar_hover_interaction_active() {
++            return;
++        }
++        let Some(target) = self.sidebar_hover_target_at((mouse.column, mouse.row)) else {
++            self.sidebar_hover = None;
++            return;
++        };
++        if self.sidebar_hover.as_ref() == Some(&target) {
++            return;
++        }
++        self.sidebar_hover = Some(target.clone());
++        let (endpoint_id, focus_target) = match target {
++            ClientSidebarHoverTarget::Workspace {
++                endpoint_id,
++                workspace_id,
++            } => (
++                endpoint_id,
++                ClientEndpointFocusTarget::Workspace(workspace_id),
++            ),
++            ClientSidebarHoverTarget::Agent {
++                endpoint_id,
++                pane_id,
++            } => (endpoint_id, ClientEndpointFocusTarget::Pane(pane_id)),
++        };
++        // Hovering a row on another machine must not silently switch machines.
++        if endpoint_id != self.active_endpoint_id {
++            return;
++        }
++        if self.focus_or_activate(endpoint_id, focus_target, outcome) {
++            outcome.repaint = true;
++        }
++    }
++
+     fn pane_scrollbar_offset(
+         hit: &PaneHit,
+         row: u16,
+@@ -1327,12 +1413,27 @@ impl ClientShellState {
+                 return;
+             }
+             if let Some(press) = self.tab_press.take() {
+-                self.push_endpoint_method(
+-                    crate::api::schema::Method::TabFocus(crate::api::schema::TabTarget {
+-                        tab_id: press.tab_id,
+-                    }),
+-                    outcome,
+-                );
++                let now = std::time::Instant::now();
++                let double_click = self.last_tab_click.as_ref().is_some_and(|(tab_id, at)| {
++                    *tab_id == press.tab_id
++                        && now.duration_since(*at) <= std::time::Duration::from_millis(350)
++                });
++                self.last_tab_click = Some((press.tab_id.clone(), now));
++                if double_click {
++                    self.push_endpoint_method(
++                        crate::api::schema::Method::TabClose(crate::api::schema::TabTarget {
++                            tab_id: press.tab_id,
++                        }),
++                        outcome,
++                    );
++                } else {
++                    self.push_endpoint_method(
++                        crate::api::schema::Method::TabFocus(crate::api::schema::TabTarget {
++                            tab_id: press.tab_id,
++                        }),
++                        outcome,
++                    );
++                }
+                 return;
+             }
+         }
+@@ -1846,38 +1947,30 @@ impl ClientShellState {
+                 );
+             }
+             MouseEventKind::ScrollUp if super::contains(self.hits.agent_body, point) => {
+-                let next = self.agent_scroll.saturating_sub(1);
+-                if next != self.agent_scroll {
+-                    self.agent_scroll = next;
+-                    outcome.repaint = true;
+-                }
++                self.record_binding(
++                    crate::input::KeybindMatch::Action(crate::input::KeybindAction::PreviousAgent),
++                    outcome,
++                );
+             }
+             MouseEventKind::ScrollDown if super::contains(self.hits.agent_body, point) => {
+-                let next = self
+-                    .agent_scroll
+-                    .saturating_add(1)
+-                    .min(self.hits.agent_max_scroll);
+-                if next != self.agent_scroll {
+-                    self.agent_scroll = next;
+-                    outcome.repaint = true;
+-                }
++                self.record_binding(
++                    crate::input::KeybindMatch::Action(crate::input::KeybindAction::NextAgent),
++                    outcome,
++                );
+             }
+             MouseEventKind::ScrollUp if super::contains(self.hits.workspace_body, point) => {
+-                let next = self.workspace_scroll.saturating_sub(1);
+-                if next != self.workspace_scroll {
+-                    self.workspace_scroll = next;
+-                    outcome.repaint = true;
+-                }
++                self.record_binding(
++                    crate::input::KeybindMatch::Action(
++                        crate::input::KeybindAction::PreviousWorkspace,
++                    ),
++                    outcome,
++                );
+             }
+             MouseEventKind::ScrollDown if super::contains(self.hits.workspace_body, point) => {
+-                let next = self
+-                    .workspace_scroll
+-                    .saturating_add(1)
+-                    .min(self.hits.workspace_max_scroll);
+-                if next != self.workspace_scroll {
+-                    self.workspace_scroll = next;
+-                    outcome.repaint = true;
+-                }
++                self.record_binding(
++                    crate::input::KeybindMatch::Action(crate::input::KeybindAction::NextWorkspace),
++                    outcome,
++                );
+             }
+             MouseEventKind::Down(MouseButton::Left) => {
+                 if self.selection.take().is_some() {
+@@ -2250,6 +2343,7 @@ impl ClientShellState {
+             MouseEventKind::Up(MouseButton::Left | MouseButton::Middle)
+             | MouseEventKind::Drag(MouseButton::Left | MouseButton::Middle) => {}
+             MouseEventKind::Moved => {
++                self.hover_sidebar(mouse, outcome);
+                 if let Some(hit) = self
+                     .hits
+                     .panes
+diff --git a/src/client/shell/state.rs b/src/client/shell/state.rs
+index 901c5a2..d27ff6a 100644
+--- a/src/client/shell/state.rs
++++ b/src/client/shell/state.rs
+@@ -184,6 +184,18 @@ pub(super) struct ClientTabPress {
+     pub(super) start_row: u16,
+ }
+ 
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(super) enum ClientSidebarHoverTarget {
++    Workspace {
++        endpoint_id: ClientEndpointId,
++        workspace_id: String,
++    },
++    Agent {
++        endpoint_id: ClientEndpointId,
++        pane_id: String,
++    },
++}
++
+ pub(super) enum ClientChromeDrag {
+     SidebarWidth,
+     SidebarSection,
+@@ -854,6 +866,8 @@ pub(crate) struct ClientShellState {
+     pub(super) sidebar_section_split_manual: bool,
+     pub(super) agent_panel_sort_manual: bool,
+     pub(super) last_sidebar_divider_click: Option<std::time::Instant>,
++    pub(super) last_tab_click: Option<(String, std::time::Instant)>,
++    pub(super) sidebar_hover: Option<ClientSidebarHoverTarget>,
+     pub(super) chrome_drag: Option<ClientChromeDrag>,
+     pub(super) workspace_press: Option<ClientWorkspacePress>,
+     pub(super) tab_press: Option<ClientTabPress>,
+@@ -1016,6 +1030,8 @@ impl ClientShellState {
+             sidebar_section_split_manual: preferences.sidebar_section_split.is_some(),
+             agent_panel_sort_manual: preferences.agent_panel_sort.is_some(),
+             last_sidebar_divider_click: None,
++            last_tab_click: None,
++            sidebar_hover: None,
+             chrome_drag: None,
+             workspace_press: None,
+             tab_press: None,
+diff --git a/src/client/shell/tests/agents_worktrees_notifications.rs b/src/client/shell/tests/agents_worktrees_notifications.rs
+index 5b8b122..5f52fb5 100644
+--- a/src/client/shell/tests/agents_worktrees_notifications.rs
++++ b/src/client/shell/tests/agents_worktrees_notifications.rs
+@@ -539,22 +539,29 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
+         Some("pane_2")
+     );
+     let body = state.hits.agent_body;
+-    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+-        kind: MouseEventKind::ScrollDown,
+-        column: body.x,
+-        row: body.y,
+-        modifiers: KeyModifiers::empty(),
+-    })]);
++    let scrolled =
++        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
++            kind: MouseEventKind::ScrollDown,
++            column: body.x,
++            row: body.y,
++            modifiers: KeyModifiers::empty(),
++        })]);
++    // The wheel now switches focus instead of scrolling the list.
++    assert!(matches!(
++        &scrolled.actions[..],
++        [ClientShellAction::Endpoint { request, .. }]
++            if matches!(&request.method, crate::api::schema::Method::PaneFocus(_))
++    ));
+     state
+         .compose(106, 10)
+-        .expect("scrolled agent sidebar frame");
++        .expect("agent sidebar frame after wheel");
+     assert_eq!(
+         state
+             .hits
+             .agents
+             .first()
+             .map(|(_, pane_id)| pane_id.as_str()),
+-        Some("pane_1")
++        Some("pane_2")
+     );
+ 
+     state.sidebar_collapsed = true;
+diff --git a/src/client/shell/tests/mouse_selection.rs b/src/client/shell/tests/mouse_selection.rs
+index ae4168c..5916d7f 100644
+--- a/src/client/shell/tests/mouse_selection.rs
++++ b/src/client/shell/tests/mouse_selection.rs
+@@ -1040,6 +1040,46 @@ fn tab_click_waits_for_release_and_drag_reorders_by_stable_id() {
+     ));
+ }
+ 
++#[test]
++fn double_clicking_a_tab_closes_it() {
++    let mut projected = snapshot();
++    let mut second_tab = projected.tabs[0].clone();
++    second_tab.tab_id = "tab_2".into();
++    second_tab.number = 2;
++    second_tab.label = "2".into();
++    second_tab.focused = false;
++    projected.tabs.push(second_tab);
++    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
++    state.set_snapshot(Box::new(projected));
++    state.set_pane_surface(surface());
++    state.compose(106, 20).expect("two tabs");
++    let rect = state.hits.tabs[1].0;
++    let click = |kind| {
++        RawInputEvent::Mouse(crossterm::event::MouseEvent {
++            kind,
++            column: rect.x + 1,
++            row: rect.y,
++            modifiers: KeyModifiers::empty(),
++        })
++    };
++
++    state.handle_raw_events(vec![click(MouseEventKind::Down(MouseButton::Left))]);
++    let first_click = state.handle_raw_events(vec![click(MouseEventKind::Up(MouseButton::Left))]);
++    assert!(matches!(
++        &first_click.actions[0],
++        ClientShellAction::Endpoint { request, .. }
++            if matches!(&request.method, crate::api::schema::Method::TabFocus(target) if target.tab_id == "tab_2")
++    ));
++
++    state.handle_raw_events(vec![click(MouseEventKind::Down(MouseButton::Left))]);
++    let second_click = state.handle_raw_events(vec![click(MouseEventKind::Up(MouseButton::Left))]);
++    assert!(matches!(
++        &second_click.actions[0],
++        ClientShellAction::Endpoint { request, .. }
++            if matches!(&request.method, crate::api::schema::Method::TabClose(target) if target.tab_id == "tab_2")
++    ));
++}
++
+ #[test]
+ fn tab_drag_clears_its_drop_target_after_leaving_the_tab_row() {
+     let mut projected = snapshot();
+@@ -1159,3 +1199,135 @@ fn context_menu_keyboard_and_outside_click_are_client_owned() {
+     assert!(outside.repaint);
+     assert!(state.overlay.is_none());
+ }
++
++#[test]
++fn sidebar_mouse_hover_and_wheel_activate_workspaces() {
++    let mut projected = snapshot();
++    for (workspace_id, number) in [("ws_2", 2usize), ("ws_3", 3)] {
++        let mut workspace = projected.workspaces[0].clone();
++        workspace.workspace_id = workspace_id.into();
++        workspace.number = number;
++        workspace.focused = false;
++        projected.workspaces.push(workspace);
++    }
++    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
++    state.set_snapshot(Box::new(projected));
++    state.set_pane_surface(surface());
++    state.compose(106, 20).expect("three workspaces");
++
++    let ws_1 = state.hits.workspaces[0].rect;
++    let ws_2 = state.hits.workspaces[1].rect;
++    let ws_3 = state.hits.workspaces[2].rect;
++    let point = |kind, rect: Rect| crossterm::event::MouseEvent {
++        kind,
++        column: rect.x + 1,
++        row: rect.y,
++        modifiers: KeyModifiers::empty(),
++    };
++
++    let hovered = state.handle_raw_events(vec![RawInputEvent::Mouse(point(
++        MouseEventKind::Moved,
++        ws_2,
++    ))]);
++    assert!(matches!(
++        &hovered.actions[..],
++        [ClientShellAction::Endpoint { request, .. }]
++            if matches!(&request.method, crate::api::schema::Method::WorkspaceFocus(target) if target.workspace_id == "ws_2")
++    ));
++
++    let down = state.handle_raw_events(vec![RawInputEvent::Mouse(point(
++        MouseEventKind::ScrollDown,
++        ws_1,
++    ))]);
++    assert!(matches!(
++        &down.actions[..],
++        [ClientShellAction::Endpoint { request, .. }]
++            if matches!(&request.method, crate::api::schema::Method::WorkspaceFocus(target) if target.workspace_id == "ws_2")
++    ));
++
++    let up = state.handle_raw_events(vec![RawInputEvent::Mouse(point(
++        MouseEventKind::ScrollUp,
++        ws_3,
++    ))]);
++    assert!(matches!(
++        &up.actions[..],
++        [ClientShellAction::Endpoint { request, .. }]
++            if matches!(&request.method, crate::api::schema::Method::WorkspaceFocus(target) if target.workspace_id == "ws_3")
++    ));
++}
++
++#[test]
++fn sidebar_mouse_hover_and_wheel_activate_agents() {
++    let mut projected = snapshot();
++    for (pane_id, focused) in [("pane_2", false), ("pane_3", false)] {
++        let mut pane = projected.panes[0].clone();
++        pane.pane_id = pane_id.into();
++        pane.focused = focused;
++        projected.panes.push(pane);
++    }
++    let agent = |pane_id: &str, focused: bool, seq: u64| ClientShellAgent {
++        pane_id: pane_id.into(),
++        workspace_id: "ws_1".into(),
++        tab_id: "tab_1".into(),
++        name: Some(pane_id.into()),
++        display_agent: None,
++        agent: Some("pi".into()),
++        title: None,
++        terminal_title: None,
++        terminal_title_stripped: None,
++        agent_status: AgentStatus::Idle,
++        state_change_seq: seq,
++        state_labels: Vec::new(),
++        tokens: Vec::new(),
++        focused,
++    };
++    projected.agents = vec![
++        agent("pane_1", true, 1),
++        agent("pane_2", false, 2),
++        agent("pane_3", false, 3),
++    ];
++    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
++    state.set_snapshot(Box::new(projected));
++    state.set_pane_surface(surface());
++    state.compose(106, 20).expect("three agents");
++
++    let first = state.hits.agents[0].0;
++    let second = state.hits.agents[1].0;
++    let third = state.hits.agents[2].0;
++    let point = |kind, rect: Rect| crossterm::event::MouseEvent {
++        kind,
++        column: rect.x + 1,
++        row: rect.y,
++        modifiers: KeyModifiers::empty(),
++    };
++
++    let hovered = state.handle_raw_events(vec![RawInputEvent::Mouse(point(
++        MouseEventKind::Moved,
++        second,
++    ))]);
++    assert!(matches!(
++        &hovered.actions[..],
++        [ClientShellAction::Endpoint { request, .. }]
++            if matches!(&request.method, crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_2")
++    ));
++
++    let down = state.handle_raw_events(vec![RawInputEvent::Mouse(point(
++        MouseEventKind::ScrollDown,
++        first,
++    ))]);
++    assert!(matches!(
++        &down.actions[..],
++        [ClientShellAction::Endpoint { request, .. }]
++            if matches!(&request.method, crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_2")
++    ));
++
++    let up = state.handle_raw_events(vec![RawInputEvent::Mouse(point(
++        MouseEventKind::ScrollUp,
++        third,
++    ))]);
++    assert!(matches!(
++        &up.actions[..],
++        [ClientShellAction::Endpoint { request, .. }]
++            if matches!(&request.method, crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_3")
++    ));
++}
